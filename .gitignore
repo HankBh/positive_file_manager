@@ -17,8 +17,8 @@ wheels/
 .idea
 .vscode
 __pypy_cache__/
-data/
+
 *release/
 
-fm.py
 *.whl
+selected_rectangle.png

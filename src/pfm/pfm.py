@@ -6,11 +6,13 @@ import psutil
 import platform
 import subprocess
 
+from PIL import Image, ImageDraw
+
 from dearpygui import dearpygui as dpg
 
 import pt
 
-pfm_version = "b-1"
+pfm_version = "b-2"
 pfm_pre_version = True
 
 pfm_logger = logging.getLogger("positive_file_manager_logger")
@@ -32,11 +34,28 @@ file_icon_path = os.path.join(
     os.path.dirname(__file__), "..", "data", "icons", "file.png"
 )
 
+selected_rectangle_path = os.path.join(
+    os.path.dirname(__file__), "..", "data", "icons", "selected_rectangle.png"
+)
+
+config_path = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "data", "config.json")
+)
+
 path = os.getcwd()
 
 
 class FileManager:
     def __init__(self) -> None:
+        global config_path
+        #
+        self.config: dict = {}
+        self.init_config()
+        if os.path.exists(config_path) is True:
+            self.load_config()
+        self._config_save_to_file()
+        #
+        self.load_icons()
         self.create_notification_window()
         self.create_dir_list()
         self.create_control_center()
@@ -45,31 +64,45 @@ class FileManager:
         self.dir_list_pictures = []
         self._copy_dir: str | None = None
         self.selected_dir: str | None = None
-        self.config: dict = {}
-        self.config_path = os.path.join(os.path.dirname(__file__), "config.json")
-        if os.path.exists(self.config_path) is False:
-            self.init_config()
-        else:
-            self.load_config()
         self.create_config_window()
-        #
-        self.load_icons()
         self.refresh_dir_list()
         self._config_refresh()
         #
 
     def load_config(self) -> None:
-        with open(self.config_path, "r", encoding="utf-8") as f:
-            self.config = json.load(f)
+        with open(config_path, "r", encoding="utf-8") as f:
+            tmp = json.load(f)
+        for key in tmp:
+            if key in [
+                "selected_rectangle_color_fill",
+                "selected_rectangle_color_outline",
+            ]:
+                self.config[key] = tuple(tmp[key])
+            else:
+                self.config[key] = tmp[key]
+        pfm_logger.debug(f"設定：{self.config}")
         return None
 
     def init_config(self):
         self.config = {
-            "selected_rectangle_color": [99, 118, 255, 255],
+            "selected_rectangle_color_fill": (99, 118, 255, 255),
+            "selected_rectangle_color_outline": (99, 118, 255, 255),
+            "selected_rectangle_color_width": 2,
         }
 
     def load_icons(self):
-        global file_icon_path, folder_icon_path
+        global file_icon_path, folder_icon_path, selected_rectangle_path
+        # 動態繪製
+        rectangle_draw_img = Image.new("RGBA", (200, 200), (255, 255, 255, 0))
+        rectangle_draw_imgdraw = ImageDraw.Draw(rectangle_draw_img)
+        rectangle_draw_imgdraw.rectangle(
+            [(0, 0), (10, 10)],
+            self.config["selected_rectangle_color_fill"],
+            self.config["selected_rectangle_color_outline"],
+            self.config["selected_rectangle_color_width"],
+        )
+        rectangle_draw_img.save(selected_rectangle_path)
+        #
         with dpg.texture_registry(tag="icon_reg"):
             width, height, channels, data = dpg.load_image(folder_icon_path)
             dpg.add_static_texture(
@@ -85,10 +118,18 @@ class FileManager:
                 default_value=data,
                 tag="file_icon_texture",
             )
+            width, height, channels, data = dpg.load_image(selected_rectangle_path)
+            dpg.add_static_texture(
+                width=width,
+                height=height,
+                default_value=data,
+                tag="selected_rectangle_texture",
+            )
 
     def create_dir_list(self):
         width = dpg.get_viewport_width()
         height = dpg.get_viewport_height() - 150
+        pfm_logger.debug(f"主視窗寬：{width}，主視窗高：{height}")
         with dpg.window(
             width=width,
             height=height,
@@ -96,25 +137,37 @@ class FileManager:
             no_move=True,
             no_resize=True,
             no_title_bar=True,
-            no_collapse=True,
             no_close=True,
             tag="dir_list_window",
+            min_size=[100, 100],
+            max_size=[10000, 10000],
         ):
             with dpg.child_window(
                 width=width,
-                height=height,
+                # height=height,
                 pos=[0, 0],
                 tag="dir_list_child_window",
-                auto_resize_y=True,
-                resizable_y=True,
-                always_auto_resize=True,
             ):
-                dpg.add_drawlist(width=width, height=height, tag="dir_list_drawlist")
+                dpg.add_image(
+                    "selected_rectangle_texture",
+                    tag="selected_rectangle_image",
+                    width=1,
+                    height=30 - 15,
+                    parent="dir_list_child_window",
+                    pos=[1, 1],
+                    show=False,
+                )
                 dpg.bind_item_handler_registry(
                     "dir_list_child_window", "dir_list_child_window_handler"
                 )
             with dpg.handler_registry(tag="dir_list_child_window_handler"):
                 dpg.add_mouse_click_handler(0, callback=self.get_click_pos)
+                dpg.add_mouse_click_handler(3, callback=self.wheel_handler)
+                dpg.add_mouse_click_handler(4, callback=self.wheel_handler)
+                dpg.add_mouse_wheel_handler(callback=self.wheel_handler)
+
+    def wheel_handler(self, arg1, arg2):
+        pass
 
     def refresh_dir_list(self):
         global path
@@ -136,37 +189,41 @@ class FileManager:
         else:
             self.dirs = os.listdir(path)
         pfm_logger.debug(f"路徑：「 {path} 」，取得的檔案列表：「 {self.dirs} 」")
-        dir_height = 5
+        dir_height = 10
         for dir in self.dirs:
             full_dir_path = os.path.join(path, dir)
             pfm_logger.debug(f"製作檔名文字，檔案：{full_dir_path}")
             if os.path.isdir(full_dir_path) is True:
-                picture_id = dpg.draw_image(
+                picture_id = dpg.add_image(
                     "folder_icon_texture",
-                    (5, dir_height),
-                    (35, dir_height + 30),
-                    parent="dir_list_drawlist",
+                    pos=(5, dir_height),
+                    width=30,
+                    height=30,
+                    # (35, dir_height + 30),
+                    parent="dir_list_child_window",
                     use_internal_label=True,
                 )
             elif os.path.isfile(full_dir_path) is True:
-                picture_id = dpg.draw_image(
+                picture_id = dpg.add_image(
                     "file_icon_texture",
-                    (5, dir_height),
-                    (35, dir_height + 30),
-                    parent="dir_list_drawlist",
+                    pos=(5, dir_height),
+                    width=30,
+                    height=30,
+                    # (35, dir_height + 30),
+                    parent="dir_list_child_window",
                     use_internal_label=True,
                 )
             self.dir_list_pictures.append(picture_id)
-            text_id = dpg.draw_text(
+            text_id = dpg.add_text(
+                dir,
                 pos=[40, dir_height],
-                text=dir,
-                parent="dir_list_drawlist",
-                size=30,
+                parent="dir_list_child_window",
+                # size=30,
                 use_internal_label=True,
             )
             self.dir_list_ids.append(text_id)
             dir_height += 30
-        dpg.set_item_height("dir_list_drawlist", dir_height + 30)
+        dpg.set_item_height("dir_list_child_window", dir_height + 20)
 
     def get_click_pos(self, sender, app_data) -> None:
         global path
@@ -176,13 +233,15 @@ class FileManager:
             return None
         #
         pos_xy = dpg.get_mouse_pos()
-        pos_y = pos_xy[1]
+        child_window_pos = dpg.get_item_pos("dir_list_child_window")
+        pos_y = pos_xy[1] - child_window_pos[1]
         pfm_logger.debug(f"點擊y軸: {pos_y}")
         for y in range(0, len(self.dirs)):
             if pos_y in range(y * 30, y * 30 + 30):
                 if (self.selected_dir == os.path.join(path, self.dirs[y])) and (
                     self.selected_dir is not None
                 ):
+                    # 開啟檔案或資料夾
                     if os.path.isdir(self.selected_dir):
                         path = os.path.join(path, self.dirs[y])
                         self.refresh_dir_list()
@@ -190,24 +249,29 @@ class FileManager:
                     elif os.path.isfile(self.selected_dir):
                         self.open_file_by_default_app(self.selected_dir)
                 else:
+                    # 選擇檔案或資料夾
                     self.selected_dir = os.path.join(path, self.dirs[y])
                     pfm_logger.info(f"選擇：{self.selected_dir}")
-                    if dpg.does_item_exist("selected_rectangle") is True:
-                        dpg.delete_item("selected_rectangle")
                     child_window_width = dpg.get_item_width("dir_list_child_window")
-                    if type(child_window_width) is int:
-                        child_window_width_float = float(child_window_width - 40)
-                    else:
-                        raise RuntimeError("dpg回傳錯誤!")
-                    dpg.draw_rectangle(
-                        [3, float(y * 30) + 10],
-                        [child_window_width_float, y * 30 + 30 + 10],
-                        tag="selected_rectangle",
-                        parent="dir_list_drawlist",
-                        color=self.config["selected_rectangle_color"],
-                        thickness=2,
+                    pfm_logger.debug(
+                        f"子視窗寬(width)：{child_window_width}，資料類型：{type(child_window_width)}"
                     )
-                    dpg.move_item_down("selected_rectangle")
+                    if type(child_window_width) is not int:
+                        err_msg = f"DPG回傳值類型錯誤，回傳類型{type(child_window_width)}，應為int"
+                        pfm_logger.error(err_msg)
+                        raise RuntimeError(err_msg)
+                    else:
+                        dpg.set_item_pos(
+                            "selected_rectangle_image",
+                            [3, y * 30 + 30],  # X 軸位置 3, Y 軸位置 (已扣除滾動距離)
+                        )
+                        dpg.set_item_width(
+                            "selected_rectangle_image", child_window_width * 30
+                        )
+                        dpg.set_item_height(
+                            "selected_rectangle_image", (30 * 10 - 30)
+                        )  # 項目高度 30 - 15 變類底線
+                        dpg.show_item("selected_rectangle_image")
                 break
             else:
                 pass
@@ -221,7 +285,9 @@ class FileManager:
         elif sys_platform == "Linux":
             subprocess.run(["xdg-open", filepath], check=True)
         else:
-            self.push_notification(f"無法開啟檔案，不支援的系統：{sys_platform}")
+            err_msg = f"無法開啟檔案，不支援的系統：{sys_platform}"
+            pfm_logger.warning(err_msg)
+            self.push_notification(err_msg)
 
     def create_control_center(self):
         width = dpg.get_viewport_width()
@@ -308,9 +374,9 @@ class FileManager:
             ):
                 #
                 dpg.add_color_picker(
-                    default_value=self.config["selected_rectangle_color"],
+                    default_value=self.config["selected_rectangle_color_fill"],
                     label="外框顏色",
-                    tag="config__selected_rectangle_color",
+                    tag="config__selected_rectangle_color_fill",
                     display_rgb=True,
                     display_hex=False,
                     display_hsv=False,
@@ -339,25 +405,26 @@ class FileManager:
 
     def _config_refresh(self):
         dpg.configure_item(
-            "config__selected_rectangle_color",
-            default_value=self.config["selected_rectangle_color"],
+            "config__selected_rectangle_color_fill",
+            default_value=self.config["selected_rectangle_color_fill"],
         )
 
     def _config_init(self):
-        self.init_config()
         dpg.hide_item("config_window")
+        self.init_config()
+        self._config_save_to_file
 
     def _config_save(self):
         #
-        self.config["config__selected_rectangle_color"] = dpg.get_value(
-            "config__selected_rectangle_color"
+        self.config["config__selected_rectangle_color_fill"] = dpg.get_value(
+            "config__selected_rectangle_color_fill"
         )
         #
         self._config_save_to_file()
         dpg.hide_item("config_window")
 
     def _config_save_to_file(self):
-        with open(self.config_path, "w", encoding="utf-8") as f:
+        with open(config_path, "w", encoding="utf-8") as f:
             json.dump(self.config, f, ensure_ascii=False, indent=4)
         pfm_logger.debug("已將設定儲存到檔案。")
 
@@ -368,11 +435,9 @@ class FileManager:
         dpg.set_item_width("dir_list_window", width)
         dpg.set_item_height("dir_list_child_window", height)
         dpg.set_item_width("dir_list_child_window", width)
-        # dpg.set_item_height("dir_list_drawlist", height)
         self.refresh_dir_list()
-        dpg.set_item_width("dir_list_drawlist", width)
-        dpg.set_item_width("control_center_window", width)
         dpg.set_item_width("path_viewer_window", width)
+        dpg.set_item_width("control_center_window", width)
         #
         pos_width = dpg.get_viewport_width()
         pos_height = dpg.get_viewport_height()
@@ -424,6 +489,7 @@ class FileManager:
             no_title_bar=True,
             no_scroll_with_mouse=True,
             min_size=[10, 10],
+            max_size=[5000, 100],
             height=height,
             tag="path_viewer_window",
             pos=[0, 105],
